@@ -19,9 +19,63 @@ import torch
 import os.path as osp
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 from lib.core.config import VIBE_DATA_DIR
 from lib.models.spin import Regressor, hmr
+
+
+class PositionalEncoding(nn.Module):
+
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:x.size(0), :]
+        return self.dropout(x)
+
+
+# class TransformerModel(nn.Module):
+
+#     def __init__(self, ntoken, ninp, nhead, nhid=2048, nlayers, dropout=0.5):
+#         super(TransformerModel, self).__init__()
+#         from torch.nn import TransformerEncoder, TransformerEncoderLayer
+#         self.model_type = 'Transformer'
+#         self.pos_encoder = PositionalEncoding(ninp, dropout)
+#         encoder_layers = TransformerEncoderLayer(ninp, nhead, nhid, dropout)
+#         self.transformer_encoder = TransformerEncoder(encoder_layers, nlayers)
+#         self.encoder = nn.Embedding(ntoken, ninp)
+#         self.ninp = ninp
+#         self.decoder = nn.Linear(ninp, ntoken)
+
+#         self.init_weights()
+
+#     # def generate_square_subsequent_mask(self, sz):
+#     #     mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+#     #     mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+#     #     return mask
+
+#     def init_weights(self):
+#         initrange = 0.1
+#         self.encoder.weight.data.uniform_(-initrange, initrange)
+#         self.decoder.bias.data.zero_()
+#         self.decoder.weight.data.uniform_(-initrange, initrange)
+
+#     def forward(self, src):
+#         src = self.encoder(src) * math.sqrt(self.ninp)
+#         src = self.pos_encoder(src)
+#         output = self.transformer_encoder(src)
+#         output = self.decoder(output)
+#         return output
 
 
 class TemporalEncoder(nn.Module):
@@ -31,16 +85,30 @@ class TemporalEncoder(nn.Module):
             hidden_size=2048,
             add_linear=False,
             bidirectional=False,
-            use_residual=True
+            use_residual=True,
+            model_type='gru',
+            dropout=0.5, # transformer, dropout
+            ninp=512, # transformer, number of expected features
+            nhead=8 # transformer, number of heads for multi-head attention
     ):
         super(TemporalEncoder, self).__init__()
 
+        # GRU Model
         self.gru = nn.GRU(
             input_size=2048,
             hidden_size=hidden_size,
             bidirectional=bidirectional,
             num_layers=n_layers
         )
+
+        self.model_type = model_type # Either 'gru' or 'transformer'
+
+        print(f"[TEMPORAL ENCODER] model_type={self.model_type}")
+
+        # Transformer Model
+        self.pos_encoder = PositionalEncoding(ninp, dropout)
+        encoder_layers = nn.TransformerEncoderLayer(ninp, nhead, hidden_size, dropout)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, n_layers)
 
         self.linear = None
         if bidirectional:
@@ -49,7 +117,7 @@ class TemporalEncoder(nn.Module):
             self.linear = nn.Linear(hidden_size, 2048)
         self.use_residual = use_residual
 
-    def forward(self, x):
+    def forward_gru(self, x):
         n,t,f = x.shape
         x = x.permute(1,0,2) # NTF -> TNF
         y, _ = self.gru(x)
@@ -61,6 +129,17 @@ class TemporalEncoder(nn.Module):
             y = y + x
         y = y.permute(1,0,2) # TNF -> NTF
         return y
+
+    def forward_transformer(self, x):
+        x = self.pos_encoder(x)
+        y = self.transformer_encoder(x)
+        return y
+
+    def forward(self, x):
+        if self.model_type == 'gru':
+            return self.forward_gru(x)
+        else:
+            return self.forward_transformer(x)
 
 
 class VIBE(nn.Module):
@@ -74,6 +153,7 @@ class VIBE(nn.Module):
             bidirectional=False,
             use_residual=True,
             pretrained=osp.join(VIBE_DATA_DIR, 'spin_model_checkpoint.pth.tar'),
+            encoder_type='gru'
     ):
 
         super(VIBE, self).__init__()
@@ -87,6 +167,7 @@ class VIBE(nn.Module):
             bidirectional=bidirectional,
             add_linear=add_linear,
             use_residual=use_residual,
+            model_type=encoder_type
         )
 
         # regressor can predict cam, pose and shape params in an iterative way

@@ -47,7 +47,7 @@ TRAIN:
       SIZE: 1024
       DROPOUT: 0.2
 MODEL:
-  TEMPORAL_TYPE: 'gru'
+  TEMPORAL_TYPE: 'transformer'
   TGRU:
     NUM_LAYERS: 2
     ADD_LINEAR: true
